@@ -1,0 +1,30 @@
+version: '3.9'
+
+services:
+  # PostgreSQL — only needed when switching from SQLite to Postgres
+  # Comment out for local SQLite dev (default)
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: photomind
+      POSTGRES_PASSWORD: photomind
+      POSTGRES_DB: photomind
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    profiles:
+      - postgres   # enable with: docker-compose --profile postgres up
+
+  # Redis — optional, for production job queue
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    profiles:
+      - redis   # enable with: docker-compose --profile redis up
+
+volumes:
+  postgres_data:

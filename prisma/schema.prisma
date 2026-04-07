@@ -1,0 +1,105 @@
+// Prisma Schema for PhotoMind
+// Switch provider to "postgresql" for Supabase/production
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String          @id @default(cuid())
+  email           String          @unique
+  name            String?
+  image           String?
+  password        String?         // hashed, null for OAuth users
+  driveTokens     String?         // JSON string: { access_token, refresh_token, expiry }
+  driveConnected  Boolean         @default(false)
+  sessions        Session[]
+  referenceFaces  ReferenceFace[]
+  faceClusters    FaceCluster[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+}
+
+model Session {
+  id              String        @id @default(cuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceType      String        // LOCAL_FOLDER | LOCAL_FILES | GOOGLE_DRIVE
+  driveFolderId   String?
+  driveFolderName String?
+  status          String        @default("QUEUED") // QUEUED | PROCESSING | COMPLETED | FAILED
+  totalPhotos     Int           @default(0)
+  processedPhotos Int           @default(0)
+  failedPhotos    Int           @default(0)
+  name            String?       // user-assigned session name
+  photos          Photo[]
+  jobs            Job[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+}
+
+model Photo {
+  id              String    @id @default(cuid())
+  sessionId       String
+  session         Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId          String
+  filename        String
+  originalName    String
+  storageUrl      String
+  thumbnailUrl    String?
+  category        String    @default("UNCERTAIN") // WITH_ME | PEOPLE | NATURE | ITEMS | FOOD | VEHICLES | BUILDINGS | MIXED | UNCERTAIN
+  confidence      Float     @default(0)
+  hasFaces        Boolean   @default(false)
+  hasUser         Boolean   @default(false)
+  faceClusterIds  String    @default("[]") // JSON array of cluster IDs
+  tags            String    @default("[]") // JSON array of tag strings
+  metadata        String?   // JSON: EXIF, GPS, dimensions, etc.
+  reviewFlag      Boolean   @default(false)
+  sourceType      String    // LOCAL_FOLDER | LOCAL_FILES | GOOGLE_DRIVE
+  driveFileId     String?
+  mimeType        String?
+  fileSize        Int?
+  width           Int?
+  height          Int?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model FaceCluster {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label         String?   // user-assigned name e.g. "Mom", "John"
+  isUser        Boolean   @default(false)
+  photoCount    Int       @default(0)
+  coverPhotoId  String?
+  embedding     String    @default("[]") // JSON array: centroid float vector
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model ReferenceFace {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storageUrl  String
+  embedding   String    @default("[]") // JSON array: float vector
+  createdAt   DateTime  @default(now())
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  sessionId   String
+  session     Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  photoId     String?
+  status      String    @default("QUEUED") // QUEUED | PROCESSING | DONE | FAILED
+  errorMsg    String?
+  attempt     Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}

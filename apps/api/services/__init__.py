@@ -1,0 +1,1 @@
+# PhotoMind services package
