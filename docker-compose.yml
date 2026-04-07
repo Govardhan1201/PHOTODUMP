@@ -1,30 +1,30 @@
 version: '3.9'
 
 services:
-  # PostgreSQL — only needed when switching from SQLite to Postgres
-  # Comment out for local SQLite dev (default)
-  db:
-    image: postgres:16-alpine
+  web:
+    build:
+      context: ./apps/web
     restart: unless-stopped
+    ports:
+      - "3000:3000"
     environment:
-      POSTGRES_USER: photomind
-      POSTGRES_PASSWORD: photomind
-      POSTGRES_DB: photomind
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    profiles:
-      - postgres   # enable with: docker-compose --profile postgres up
+      - NEXT_PUBLIC_API_URL=http://api:8000
+    depends_on:
+      - api
 
-  # Redis — optional, for production job queue
-  redis:
-    image: redis:7-alpine
+  api:
+    build:
+      context: ./apps/api
     restart: unless-stopped
     ports:
-      - "6379:6379"
-    profiles:
-      - redis   # enable with: docker-compose --profile redis up
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=file:/app/data/prod.db
+      - LOCAL_UPLOAD_DIR=/app/data/uploads
+      - FRONTEND_URL=http://localhost:3000
+      - AI_ADAPTER=mock
+    volumes:
+      - app_data:/app/data
 
 volumes:
-  postgres_data:
+  app_data:
