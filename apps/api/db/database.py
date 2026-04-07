@@ -1,22 +1,62 @@
 """
-Database layer — SQLite via raw sqlite3 for zero-dependency local dev.
-In production, swap this for Prisma Client or SQLAlchemy with PostgreSQL.
+Database layer — Supports SQLite (local) or PostgreSQL (Supabase/Render) seamlessly.
+Automatically detected via DATABASE_URL.
 """
 
-import sqlite3
 import os
-import json
+import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
 
-DATABASE_PATH = os.getenv("DATABASE_URL", "file:./dev.db").replace("file:", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "file:./dev.db")
+IS_POSTGRES = DATABASE_URL.startswith("postgres")
+
+if IS_POSTGRES:
+    import psycopg2
+    import psycopg2.extras
+
+
+class PostgresWrapper:
+    """Wraps psycopg2 connection to mimic sqlite3 behavior so existing code doesn't break."""
+    def __init__(self, conn):
+        self.conn = conn
+
+    def execute(self, sql: str, params=()):
+        # Convert SQLite '?' placeholders to PostgreSQL '%s'
+        pg_sql = sql.replace("?", "%s")
+        cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(pg_sql, params)
+        return cur
+
+    def executescript(self, sql: str):
+        # Postgres supports multiple statements in standard execute
+        pg_sql = sql.replace("datetime('now')", "CURRENT_TIMESTAMP")
+        cur = self.conn.cursor()
+        cur.execute(pg_sql)
+        self.conn.commit()
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
 
 def _get_connection():
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    if IS_POSTGRES:
+        conn = psycopg2.connect(DATABASE_URL)
+        # We don't set row_factory here, we handle it in PostgresWrapper.execute
+        return PostgresWrapper(conn)
+    else:
+        path = DATABASE_URL.replace("file:", "")
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
 
 @contextmanager
 def get_db():

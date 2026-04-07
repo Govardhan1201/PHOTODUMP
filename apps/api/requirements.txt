@@ -13,6 +13,8 @@ pydantic==2.7.1
 pydantic-settings==2.2.1
 prisma==0.13.1
 anyio==4.3.0
+psycopg2-binary==2.9.9
+supabase==2.4.5
 
 # Uncomment for real face detection:
 # deepface==0.0.93
