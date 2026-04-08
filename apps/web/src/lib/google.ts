@@ -1,6 +1,9 @@
 /**
  * Dynamically loads and wraps Google Identity + Picker API.
  */
+declare var google: any;
+declare var gapi: any;
+
 export function loadGoogleScripts(clientId: string): Promise<void> {
   return new Promise((resolve, reject) => {
     let loadedCount = 0;
