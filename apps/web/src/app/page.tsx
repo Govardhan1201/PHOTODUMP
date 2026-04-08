@@ -34,18 +34,23 @@ export default function StatelessProcessorPage() {
   // Result states
   const [matchedBlobs, setMatchedBlobs] = useState<{blob: Blob, url: string, distance: number, name: string}[]>([]);
   const [clusters, setClusters] = useState<{id: string, files: {blob: Blob, url: string, name: string}[]}[]>([]);
+  const [errorStatus, setErrorStatus] = useState<string | null>(null);
 
+  // Load models on mount
   useEffect(() => {
     async function init() {
       try {
+        console.log("Loading AI Models...");
         await Promise.all([
           faceapi.nets.ssdMobilenetv1.loadFromUri('/models'),
           faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
           faceapi.nets.faceRecognitionNet.loadFromUri('/models')
         ]);
+        console.log("AI Models Loaded Successfully");
         setModelsLoaded(true);
-      } catch (err) {
+      } catch (err: any) {
         console.error("Models failed to load", err);
+        setErrorStatus(`Failed to load AI models: ${err.message || 'Unknown error'}. Check if /models files exist.`);
       }
 
       if (GOOGLE_CLIENT_ID) {
@@ -271,10 +276,20 @@ export default function StatelessProcessorPage() {
 
   if (!modelsLoaded) {
     return (
-      <div style={{ height: '70vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
-        <span className="spinner spinner-lg" />
-        <h2 style={{ textAlign: 'center' }}>Loading AI Vision Models...</h2>
-        <p style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 20 }}>Running locally directly inside your browser ensures 100% privacy.</p>
+      <div style={{ height: '70vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 20 }}>
+        {errorStatus ? (
+          <div className="card" style={{ background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', textAlign: 'center' }}>
+             <h3>❌ Error</h3>
+             <p>{errorStatus}</p>
+             <button className="btn btn-primary btn-sm" style={{ marginTop: 12 }} onClick={() => window.location.reload()}>Retry</button>
+          </div>
+        ) : (
+          <>
+            <span className="spinner spinner-lg" />
+            <h2 style={{ textAlign: 'center' }}>Loading AI Vision Models...</h2>
+            <p style={{ color: 'var(--text-muted)', textAlign: 'center' }}>Running locally directly inside your browser ensures 100% privacy.</p>
+          </>
+        )}
       </div>
     );
   }
