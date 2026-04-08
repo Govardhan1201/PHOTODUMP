@@ -7,24 +7,3 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://api:8000
-    depends_on:
-      - api
-
-  api:
-    build:
-      context: ./apps/api
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_URL=file:/app/data/prod.db
-      - LOCAL_UPLOAD_DIR=/app/data/uploads
-      - FRONTEND_URL=http://localhost:3000
-      - AI_ADAPTER=mock
-    volumes:
-      - app_data:/app/data
-
-volumes:
-  app_data:

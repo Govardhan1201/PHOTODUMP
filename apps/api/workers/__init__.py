@@ -1,1 +1,0 @@
-# PhotoMind workers package

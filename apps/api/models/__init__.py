@@ -1,1 +1,0 @@
-# PhotoMind models package
