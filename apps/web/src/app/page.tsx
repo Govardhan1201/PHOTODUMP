@@ -12,8 +12,11 @@ type InputImage =
   | { type: 'local', file: File, name: string }
   | { type: 'drive', id: string, name: string };
 
-const MAX_DETECTION_SIZE = 1000; // Increased slightly for better accuracy
-const DEFAULT_THRESHOLD = 0.45; // Stricter default to prevent false positives
+const BATCH_SIZE = 3; // Number of photos to process at the same time
+const MODES = {
+  STRICT: { threshold: 0.4, size: 1000, label: 'Strict (High Accuracy)' },
+  LOOSE:  { threshold: 0.6, size: 600,  label: 'Loose (Fast Matching)' }
+};
 
 // Users MUST put their credentials in their .env
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
@@ -38,7 +41,7 @@ export default function StatelessProcessorPage() {
   const [matchedBlobs, setMatchedBlobs] = useState<{blob: Blob, url: string, distance: number, name: string}[]>([]);
   const [clusters, setClusters] = useState<{id: string, files: {blob: Blob, url: string, name: string}[]}[]>([]);
   const [errorStatus, setErrorStatus] = useState<string | null>(null);
-  const [threshold, setThreshold] = useState(DEFAULT_THRESHOLD);
+  const [processMode, setProcessMode] = useState<keyof typeof MODES>('STRICT');
 
   // Load models on mount
   useEffect(() => {
@@ -126,20 +129,21 @@ export default function StatelessProcessorPage() {
       
       img.onload = async () => {
         try {
+          const maxDim = MODES[processMode].size;
           // Use a hidden canvas to downscale
           const canvas = document.createElement('canvas');
           let width = img.width;
           let height = img.height;
           
           if (width > height) {
-            if (width > MAX_DETECTION_SIZE) {
-              height *= MAX_DETECTION_SIZE / width;
-              width = MAX_DETECTION_SIZE;
+            if (width > maxDim) {
+              height *= maxDim / width;
+              width = maxDim;
             }
           } else {
-            if (height > MAX_DETECTION_SIZE) {
-              width *= MAX_DETECTION_SIZE / height;
-              height = MAX_DETECTION_SIZE;
+            if (height > maxDim) {
+              width *= maxDim / height;
+              height = maxDim;
             }
           }
           
@@ -185,43 +189,47 @@ export default function StatelessProcessorPage() {
       const targetFace = targetDetections.reduce((prev, current) => 
         (prev.detection.box.area > current.detection.box.area) ? prev : current
       );
-      const faceMatcher = new faceapi.FaceMatcher([new faceapi.LabeledFaceDescriptors('target', [targetFace.descriptor])], threshold);
+      
+      const config = MODES[processMode];
+      const faceMatcher = new faceapi.FaceMatcher([new faceapi.LabeledFaceDescriptors('target', [targetFace.descriptor])], config.threshold);
 
       const matches: {blob: Blob, url: string, distance: number, name: string}[] = [];
 
-      for (let i = 0; i < sourceItems.length; i++) {
-        const item = sourceItems[i];
-        setProgressMsg(`Scanning photo ${i + 1} of ${sourceItems.length}...`);
+      // Parallel Batch Processing
+      for (let i = 0; i < sourceItems.length; i += BATCH_SIZE) {
+        const batch = sourceItems.slice(i, i + BATCH_SIZE);
+        setProgressMsg(`Scanning photos ${i + 1} - ${Math.min(i + BATCH_SIZE, sourceItems.length)} of ${sourceItems.length}...`);
         setProgressPct(10 + Math.floor((i / sourceItems.length) * 90));
-        
-        try {
-          let blob: Blob;
-          if (item.type === 'drive') {
-            blob = await downloadDriveFile(googleAccessToken!, item.id);
-          } else {
-            blob = item.file as Blob;
-          }
 
-          const detections = await getDescriptorsForImageBlob(blob);
-          let bestDistance = 1.0;
-          let found = false;
-
-          for (const d of detections) {
-            const match = faceMatcher.findBestMatch(d.descriptor);
-            if (match.label === 'target') {
-              found = true;
-              if (match.distance < bestDistance) bestDistance = match.distance;
+        await Promise.all(batch.map(async (item) => {
+          try {
+            let blob: Blob;
+            if (item.type === 'drive') {
+              blob = await downloadDriveFile(googleAccessToken!, item.id);
+            } else {
+              blob = item.file as Blob;
             }
-          }
 
-          if (found) {
-            matches.push({ blob, url: URL.createObjectURL(blob), distance: bestDistance, name: item.name });
+            const detections = await getDescriptorsForImageBlob(blob);
+            let bestDistance = 1.0;
+            let found = false;
+
+            for (const d of detections) {
+              const match = faceMatcher.findBestMatch(d.descriptor);
+              if (match.label === 'target') {
+                found = true;
+                if (match.distance < bestDistance) bestDistance = match.distance;
+              }
+            }
+
+            if (found) {
+              matches.push({ blob, url: URL.createObjectURL(blob), distance: bestDistance, name: item.name });
+            }
+          } catch (err) {
+            console.error(`Error processing ${item.name}`, err);
           }
-        } catch (itemErr) {
-          console.error(`Skipping file ${item.name} due to error:`, itemErr);
-        }
-        
-        // Yield to browser UI thread more aggressively
+        }));
+
         await new Promise(r => setTimeout(r, 0));
       }
 
@@ -246,52 +254,53 @@ export default function StatelessProcessorPage() {
 
     try {
       const activeClusters: { id: string, descriptor: Float32Array, files: {blob: Blob, url: string, name: string}[] }[] = [];
+      const config = MODES[processMode];
 
-      for (let i = 0; i < sourceItems.length; i++) {
-        const item = sourceItems[i];
-        setProgressMsg(`Analyzing faces in photo ${i + 1} of ${sourceItems.length}...`);
+      for (let i = 0; i < sourceItems.length; i += BATCH_SIZE) {
+        const batch = sourceItems.slice(i, i + BATCH_SIZE);
+        setProgressMsg(`Analyzing photos ${i + 1} - ${Math.min(i + BATCH_SIZE, sourceItems.length)} of ${sourceItems.length}...`);
         setProgressPct(5 + Math.floor((i / sourceItems.length) * 90));
 
-        try {
-          let blob: Blob;
-          if (item.type === 'drive') {
-            blob = await downloadDriveFile(googleAccessToken!, item.id);
-          } else {
-            blob = item.file as Blob;
-          }
-          
-          const detections = await getDescriptorsForImageBlob(blob);
-          let addedFileToFinalResults = false;
-
-          for (const d of detections) {
-            let matchedCluster = null;
-            let bestDist = threshold;
-
-            for (const cluster of activeClusters) {
-              const dist = faceapi.euclideanDistance(d.descriptor, cluster.descriptor);
-              if (dist < bestDist) {
-                bestDist = dist;
-                matchedCluster = cluster;
-              }
-            }
-
-            if (matchedCluster) {
-              if (!matchedCluster.files.find(f => f.name === item.name)) {
-                matchedCluster.files.push({ blob, url: URL.createObjectURL(blob), name: item.name });
-                addedFileToFinalResults = true;
-              }
+        await Promise.all(batch.map(async (item) => {
+          try {
+            let blob: Blob;
+            if (item.type === 'drive') {
+              blob = await downloadDriveFile(googleAccessToken!, item.id);
             } else {
-              activeClusters.push({
-                id: `Person ${activeClusters.length + 1}`,
-                descriptor: d.descriptor,
-                files: [{ blob, url: URL.createObjectURL(blob), name: item.name }]
-              });
-              addedFileToFinalResults = true;
+              blob = item.file as Blob;
             }
+            
+            const detections = await getDescriptorsForImageBlob(blob);
+            const url = URL.createObjectURL(blob);
+
+            for (const d of detections) {
+              let matchedCluster = null;
+              let bestDist = config.threshold;
+
+              for (const cluster of activeClusters) {
+                const dist = faceapi.euclideanDistance(d.descriptor, cluster.descriptor);
+                if (dist < bestDist) {
+                  bestDist = dist;
+                  matchedCluster = cluster;
+                }
+              }
+
+              if (matchedCluster) {
+                if (!matchedCluster.files.find(f => f.name === item.name)) {
+                  matchedCluster.files.push({ blob, url, name: item.name });
+                }
+              } else {
+                activeClusters.push({
+                  id: `Person ${activeClusters.length + 1}`,
+                  descriptor: d.descriptor,
+                  files: [{ blob, url, name: item.name }]
+                });
+              }
+            }
+          } catch (err) {
+            console.error(`Error processing ${item.name}`, err);
           }
-        } catch (itemErr) {
-          console.error(`Skipping file ${item.name} due to error:`, itemErr);
-        }
+        }));
 
         await new Promise(r => setTimeout(r, 0));
       }
@@ -431,24 +440,25 @@ export default function StatelessProcessorPage() {
 
       {sourceItems.length > 0 && !isProcessing && progressPct === 0 && (
          <div style={{ textAlign: 'center', margin: '40px 0' }}>
-            <div style={{ marginBottom: 32, maxWidth: 400, margin: '0 auto 40px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 14 }}>
-                <label style={{ fontWeight: 600 }}>AI Sensitivity (Accuracy)</label>
-                <span style={{ color: 'var(--brand-primary)', fontWeight: 700 }}>{Math.round((1 - threshold) * 100)}%</span>
-              </div>
-              <input 
-                type="range" 
-                min="0.3" 
-                max="0.7" 
-                step="0.05" 
-                value={threshold} 
-                onChange={(e) => setThreshold(parseFloat(e.target.value))}
-                style={{ width: '100%', accentColor: 'var(--brand-primary)' }}
-                className="slider-input"
-              />
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
-                <span>Looser (More False Positives)</span>
-                <span>Stricter (Better Accuracy)</span>
+            <div style={{ marginBottom: 32, maxWidth: 500, margin: '0 auto 40px' }}>
+              <label style={{ display: 'block', fontWeight: 600, marginBottom: 12 }}>Choose Processing Speed & Accuracy</label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <button 
+                  className={`btn ${processMode === 'LOOSE' ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setProcessMode('LOOSE')}
+                  style={{ fontSize: '14px', padding: '12px' }}
+                >
+                  🚀 Loose Mode<br/>
+                  <small style={{ opacity: 0.8, fontWeight: 'normal' }}>Fastest • High Speed</small>
+                </button>
+                <button 
+                  className={`btn ${processMode === 'STRICT' ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setProcessMode('STRICT')}
+                  style={{ fontSize: '14px', padding: '12px' }}
+                >
+                  ⚖️ Strict Mode<br/>
+                  <small style={{ opacity: 0.8, fontWeight: 'normal' }}>Best Accuracy • Deep Scan</small>
+                </button>
               </div>
             </div>
 
