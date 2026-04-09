@@ -12,7 +12,8 @@ type InputImage =
   | { type: 'local', file: File, name: string }
   | { type: 'drive', id: string, name: string };
 
-const MAX_DETECTION_SIZE = 800; // Downscale images to this max width/height for faster AI processing
+const MAX_DETECTION_SIZE = 1000; // Increased slightly for better accuracy
+const DEFAULT_THRESHOLD = 0.45; // Stricter default to prevent false positives
 
 // Users MUST put their credentials in their .env
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
@@ -37,6 +38,7 @@ export default function StatelessProcessorPage() {
   const [matchedBlobs, setMatchedBlobs] = useState<{blob: Blob, url: string, distance: number, name: string}[]>([]);
   const [clusters, setClusters] = useState<{id: string, files: {blob: Blob, url: string, name: string}[]}[]>([]);
   const [errorStatus, setErrorStatus] = useState<string | null>(null);
+  const [threshold, setThreshold] = useState(DEFAULT_THRESHOLD);
 
   // Load models on mount
   useEffect(() => {
@@ -183,7 +185,7 @@ export default function StatelessProcessorPage() {
       const targetFace = targetDetections.reduce((prev, current) => 
         (prev.detection.box.area > current.detection.box.area) ? prev : current
       );
-      const faceMatcher = new faceapi.FaceMatcher([new faceapi.LabeledFaceDescriptors('target', [targetFace.descriptor])], MATCH_THRESHOLD);
+      const faceMatcher = new faceapi.FaceMatcher([new faceapi.LabeledFaceDescriptors('target', [targetFace.descriptor])], threshold);
 
       const matches: {blob: Blob, url: string, distance: number, name: string}[] = [];
 
@@ -263,7 +265,7 @@ export default function StatelessProcessorPage() {
 
           for (const d of detections) {
             let matchedCluster = null;
-            let bestDist = MATCH_THRESHOLD;
+            let bestDist = threshold;
 
             for (const cluster of activeClusters) {
               const dist = faceapi.euclideanDistance(d.descriptor, cluster.descriptor);
@@ -429,6 +431,27 @@ export default function StatelessProcessorPage() {
 
       {sourceItems.length > 0 && !isProcessing && progressPct === 0 && (
          <div style={{ textAlign: 'center', margin: '40px 0' }}>
+            <div style={{ marginBottom: 32, maxWidth: 400, margin: '0 auto 40px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 14 }}>
+                <label style={{ fontWeight: 600 }}>AI Sensitivity (Accuracy)</label>
+                <span style={{ color: 'var(--brand-primary)', fontWeight: 700 }}>{Math.round((1 - threshold) * 100)}%</span>
+              </div>
+              <input 
+                type="range" 
+                min="0.3" 
+                max="0.7" 
+                step="0.05" 
+                value={threshold} 
+                onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                style={{ width: '100%', accentColor: 'var(--brand-primary)' }}
+                className="slider-input"
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>
+                <span>Looser (More False Positives)</span>
+                <span>Stricter (Better Accuracy)</span>
+              </div>
+            </div>
+
             <button className="btn btn-primary btn-lg" onClick={mode === 'FIND' ? runFindMatch : runClustering} style={{ width: '100%', maxWidth: 400 }}>
               ▶ Start AI Scan
             </button>
