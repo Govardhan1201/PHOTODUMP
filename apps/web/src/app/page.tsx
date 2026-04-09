@@ -6,19 +6,13 @@ import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { loadGoogleScripts, authorizeGoogleDrive, createFolderPicker, getFilesInFolder, downloadDriveFile } from '@/lib/google';
 
-const MATCH_THRESHOLD = 0.55; 
-
-type InputImage = 
-  | { type: 'local', file: File, name: string }
-  | { type: 'drive', id: string, name: string };
-
-const BATCH_SIZE = 3; // Number of photos to process at the same time
+const BATCH_SIZE = 3; 
 const MODES = {
-  STRICT: { threshold: 0.4, size: 1000, label: 'Strict (High Accuracy)' },
-  LOOSE:  { threshold: 0.6, size: 600,  label: 'Loose (Fast Matching)' }
+  STRICT:   { threshold: 0.35, size: 1000, label: 'Strict',   desc: 'True Accuracy' },
+  MODERATE: { threshold: 0.5,  size: 800,  label: 'Moderate', desc: 'Balanced Scan' },
+  LOOSE:    { threshold: 0.65, size: 600,  label: 'Loose',    desc: 'High Speed' }
 };
 
-// Users MUST put their credentials in their .env
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
 const GOOGLE_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY || '';
 
@@ -27,46 +21,32 @@ export default function StatelessProcessorPage() {
   const [mode, setMode] = useState<'FIND' | 'GROUP' | null>(null);
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
   
-  // File states
   const [targetFile, setTargetFile] = useState<File | null>(null);
   const [targetPreview, setTargetPreview] = useState<string | null>(null);
   const [sourceItems, setSourceItems] = useState<InputImage[]>([]);
   
-  // Processing states
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [progressPct, setProgressPct] = useState(0);
   
-  // Result states
   const [matchedBlobs, setMatchedBlobs] = useState<{blob: Blob, url: string, distance: number, name: string}[]>([]);
   const [clusters, setClusters] = useState<{id: string, files: {blob: Blob, url: string, name: string}[]}[]>([]);
   const [errorStatus, setErrorStatus] = useState<string | null>(null);
-  const [processMode, setProcessMode] = useState<keyof typeof MODES>('STRICT');
+  const [processMode, setProcessMode] = useState<keyof typeof MODES>('MODERATE');
 
-  // Load models on mount
   useEffect(() => {
     async function init() {
       try {
-        console.log("Loading AI Models...");
         await Promise.all([
           faceapi.nets.ssdMobilenetv1.loadFromUri('/models'),
           faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
           faceapi.nets.faceRecognitionNet.loadFromUri('/models')
         ]);
-        console.log("AI Models Loaded Successfully");
         setModelsLoaded(true);
       } catch (err: any) {
-        console.error("Models failed to load", err);
-        setErrorStatus(`Failed to load AI models: ${err.message || 'Unknown error'}. Check if /models files exist.`);
+        setErrorStatus(`Failed to load AI models: ${err.message || 'Unknown error'}`);
       }
-
-      if (GOOGLE_CLIENT_ID) {
-        try {
-           await loadGoogleScripts(GOOGLE_CLIENT_ID);
-        } catch (err) {
-           console.error("Google Scripts failed to load");
-        }
-      }
+      if (GOOGLE_CLIENT_ID) loadGoogleScripts(GOOGLE_CLIENT_ID).catch(() => {});
     }
     init();
   }, []);
@@ -90,21 +70,16 @@ export default function StatelessProcessorPage() {
   };
 
   const handleDriveFolder = async () => {
-    if (!GOOGLE_CLIENT_ID || !GOOGLE_API_KEY) {
-      alert("Missing Google Credentials in .env (.local)");
-      return;
-    }
-    
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_API_KEY) return alert("Missing Google Credentials");
     try {
       let token = googleAccessToken;
       if (!token) {
         token = await authorizeGoogleDrive(GOOGLE_CLIENT_ID);
         setGoogleAccessToken(token);
       }
-      
       const folder = await createFolderPicker(token, GOOGLE_API_KEY);
       if (folder) {
-        setProgressMsg('Fetching Drive file list...');
+        setProgressMsg('Connecting to Drive...');
         setIsProcessing(true);
         const files = await getFilesInFolder(token, folder.id);
         setSourceItems(files.map(f => ({ type: 'drive', id: f.id, name: f.name })));
@@ -113,250 +88,122 @@ export default function StatelessProcessorPage() {
         setIsProcessing(false);
       }
     } catch (err) {
-      console.error(err);
-      alert("Failed to connect to Google Drive");
+      alert("Drive connection failed");
       setIsProcessing(false);
     }
   };
 
-  // ─── SAFE IMAGE LOADER ───
-  // Downscales image to preserve memory and speed up AI inference
   const getDescriptorsForImageBlob = async (blob: Blob) => {
     return new Promise<faceapi.WithFaceDescriptor<faceapi.WithFaceLandmarks<{ detection: faceapi.FaceDetection }>>[]>(async (resolve, reject) => {
       const url = URL.createObjectURL(blob);
       const img = document.createElement('img');
       img.src = url;
-      
       img.onload = async () => {
         try {
           const maxDim = MODES[processMode].size;
-          // Use a hidden canvas to downscale
           const canvas = document.createElement('canvas');
-          let width = img.width;
-          let height = img.height;
-          
-          if (width > height) {
-            if (width > maxDim) {
-              height *= maxDim / width;
-              width = maxDim;
-            }
-          } else {
-            if (height > maxDim) {
-              width *= maxDim / height;
-              height = maxDim;
-            }
-          }
-          
-          canvas.width = width;
-          canvas.height = height;
+          let w = img.width, h = img.height;
+          if (w > h) { if (w > maxDim) { h *= maxDim / w; w = maxDim; } }
+          else { if (h > maxDim) { w *= maxDim / h; h = maxDim; } }
+          canvas.width = w; canvas.height = h;
           const ctx = canvas.getContext('2d');
-          if (!ctx) throw new Error("Canvas context failed");
-          
-          ctx.drawImage(img, 0, 0, width, height);
-          
-          // Run detection on the smaller canvas
+          ctx?.drawImage(img, 0, 0, w, h);
           const detections = await faceapi.detectAllFaces(canvas).withFaceLandmarks().withFaceDescriptors();
-          
           URL.revokeObjectURL(url);
           resolve(detections);
-        } catch (err) {
-          URL.revokeObjectURL(url);
-          reject(err);
-        }
+        } catch (err) { URL.revokeObjectURL(url); reject(err); }
       };
-      img.onerror = () => {
-        URL.revokeObjectURL(url);
-        reject(new Error("Failed to load image"));
-      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Image failed to load")); };
     });
   };
 
-  // ─── RUNNING THE FIND MATCH ALGORITHM ───
   const runFindMatch = async () => {
     if (!targetFile || sourceItems.length === 0) return;
-    setIsProcessing(true);
-    setMatchedBlobs([]);
-    setProgressMsg('Extracting target face...');
-    setProgressPct(5);
-
+    setIsProcessing(true); setMatchedBlobs([]); setProgressMsg('Preparing target...'); setProgressPct(5);
     try {
       const targetDetections = await getDescriptorsForImageBlob(targetFile);
-      if (targetDetections.length === 0) {
-         alert("No face detected in target image!");
-         setIsProcessing(false);
-         return;
-      }
-      const targetFace = targetDetections.reduce((prev, current) => 
-        (prev.detection.box.area > current.detection.box.area) ? prev : current
-      );
-      
+      if (targetDetections.length === 0) { alert("No face detected in target!"); setIsProcessing(false); return; }
+      const targetFace = targetDetections.reduce((prev, curr) => (prev.detection.box.area > curr.detection.box.area) ? prev : curr);
       const config = MODES[processMode];
-      const faceMatcher = new faceapi.FaceMatcher([new faceapi.LabeledFaceDescriptors('target', [targetFace.descriptor])], config.threshold);
+      const matcher = new faceapi.FaceMatcher([new faceapi.LabeledFaceDescriptors('target', [targetFace.descriptor])], config.threshold);
 
-      const matches: {blob: Blob, url: string, distance: number, name: string}[] = [];
-
-      // Parallel Batch Processing
+      const matches: any[] = [];
       for (let i = 0; i < sourceItems.length; i += BATCH_SIZE) {
         const batch = sourceItems.slice(i, i + BATCH_SIZE);
-        setProgressMsg(`Scanning photos ${i + 1} - ${Math.min(i + BATCH_SIZE, sourceItems.length)} of ${sourceItems.length}...`);
+        setProgressMsg(`Scanning ${i + 1} - ${Math.min(i + BATCH_SIZE, sourceItems.length)} of ${sourceItems.length}...`);
         setProgressPct(10 + Math.floor((i / sourceItems.length) * 90));
-
         await Promise.all(batch.map(async (item) => {
           try {
-            let blob: Blob;
-            if (item.type === 'drive') {
-              blob = await downloadDriveFile(googleAccessToken!, item.id);
-            } else {
-              blob = item.file as Blob;
-            }
-
+            const blob = item.type === 'drive' ? await downloadDriveFile(googleAccessToken!, item.id) : (item.file as Blob);
             const detections = await getDescriptorsForImageBlob(blob);
-            let bestDistance = 1.0;
-            let found = false;
-
+            let bestDist = 1.0; let found = false;
             for (const d of detections) {
-              const match = faceMatcher.findBestMatch(d.descriptor);
-              if (match.label === 'target') {
-                found = true;
-                if (match.distance < bestDistance) bestDistance = match.distance;
-              }
+              const m = matcher.findBestMatch(d.descriptor);
+              if (m.label === 'target') { found = true; if (m.distance < bestDist) bestDist = m.distance; }
             }
-
-            if (found) {
-              matches.push({ blob, url: URL.createObjectURL(blob), distance: bestDistance, name: item.name });
-            }
-          } catch (err) {
-            console.error(`Error processing ${item.name}`, err);
-          }
+            if (found) matches.push({ blob, url: URL.createObjectURL(blob), distance: bestDist, name: item.name });
+          } catch (err) { console.error(err); }
         }));
-
         await new Promise(r => setTimeout(r, 0));
       }
-
       setMatchedBlobs(matches.sort((a,b) => a.distance - b.distance));
-      setProgressMsg('Processing complete!');
-      setProgressPct(100);
-    } catch (err) {
-      console.error(err);
-      setProgressMsg('An error occurred during processing.');
-    } finally {
-      setIsProcessing(false);
-    }
+      setProgressMsg('Scan complete!'); setProgressPct(100);
+    } catch (err) { setProgressMsg('Processing halted due to error'); }
+    finally { setIsProcessing(false); }
   };
 
-  // ─── RUNNING THE CLUSTER ALGORITHM ───
   const runClustering = async () => {
     if (sourceItems.length === 0) return;
-    setIsProcessing(true);
-    setClusters([]);
-    setProgressMsg('Initializing clustering engine...');
-    setProgressPct(5);
-
+    setIsProcessing(true); setClusters([]); setProgressMsg('Initializing Engine...'); setProgressPct(5);
     try {
-      const activeClusters: { id: string, descriptor: Float32Array, files: {blob: Blob, url: string, name: string}[] }[] = [];
+      const activeClusters: any[] = [];
       const config = MODES[processMode];
-
       for (let i = 0; i < sourceItems.length; i += BATCH_SIZE) {
         const batch = sourceItems.slice(i, i + BATCH_SIZE);
-        setProgressMsg(`Analyzing photos ${i + 1} - ${Math.min(i + BATCH_SIZE, sourceItems.length)} of ${sourceItems.length}...`);
+        setProgressMsg(`Analyzing ${i + 1} - ${Math.min(i + BATCH_SIZE, sourceItems.length)} of ${sourceItems.length}...`);
         setProgressPct(5 + Math.floor((i / sourceItems.length) * 90));
-
         await Promise.all(batch.map(async (item) => {
           try {
-            let blob: Blob;
-            if (item.type === 'drive') {
-              blob = await downloadDriveFile(googleAccessToken!, item.id);
-            } else {
-              blob = item.file as Blob;
-            }
-            
+            const blob = item.type === 'drive' ? await downloadDriveFile(googleAccessToken!, item.id) : (item.file as Blob);
             const detections = await getDescriptorsForImageBlob(blob);
             const url = URL.createObjectURL(blob);
-
             for (const d of detections) {
-              let matchedCluster = null;
-              let bestDist = config.threshold;
-
-              for (const cluster of activeClusters) {
-                const dist = faceapi.euclideanDistance(d.descriptor, cluster.descriptor);
-                if (dist < bestDist) {
-                  bestDist = dist;
-                  matchedCluster = cluster;
-                }
+              let matched = null; let bDist = config.threshold;
+              for (const cl of activeClusters) {
+                const dist = faceapi.euclideanDistance(d.descriptor, cl.descriptor);
+                if (dist < bDist) { bDist = dist; matched = cl; }
               }
-
-              if (matchedCluster) {
-                if (!matchedCluster.files.find(f => f.name === item.name)) {
-                  matchedCluster.files.push({ blob, url, name: item.name });
-                }
+              if (matched) {
+                if (!matched.files.find((f:any) => f.name === item.name)) matched.files.push({ blob, url, name: item.name });
               } else {
-                activeClusters.push({
-                  id: `Person ${activeClusters.length + 1}`,
-                  descriptor: d.descriptor,
-                  files: [{ blob, url, name: item.name }]
-                });
+                activeClusters.push({ id: `Person ${activeClusters.length + 1}`, descriptor: d.descriptor, files: [{ blob, url, name: item.name }] });
               }
             }
-          } catch (err) {
-            console.error(`Error processing ${item.name}`, err);
-          }
+          } catch (err) { console.error(err); }
         }));
-
         await new Promise(r => setTimeout(r, 0));
       }
-
-      const validClusters = activeClusters.filter(c => c.files.length >= 2).map(c => ({
-        id: c.id, files: c.files
-      }));
-
-      setClusters(validClusters);
-      setProgressMsg(`Found ${validClusters.length} distinct people!`);
-      setProgressPct(100);
-    } catch (err) {
-      console.error(err);
-      setProgressMsg('An error occurred during clustering.');
-    } finally {
-      setIsProcessing(false);
-    }
+      setClusters(activeClusters.filter(c => c.files.length >= 2));
+      setProgressMsg(`Optimized groups ready!`); setProgressPct(100);
+    } catch (err) { setProgressMsg('Error during grouping'); }
+    finally { setIsProcessing(false); }
   };
 
-  // ─── ZIP EXPORT ───
-  const downloadMatches = async () => {
-    if (matchedBlobs.length === 0) return;
-    setIsProcessing(true);
-    setProgressMsg('Zipping files...');
-    const zip = new JSZip();
-    matchedBlobs.forEach(m => zip.file(m.name, m.blob));
-    const blob = await zip.generateAsync({ type: 'blob' });
-    saveAs(blob, 'PhotoMind-Matches.zip');
-    setIsProcessing(false);
-  };
-
-  const downloadCluster = async (cluster: any) => {
-    setIsProcessing(true);
-    setProgressMsg('Zipping cluster...');
-    const zip = new JSZip();
-    cluster.files.forEach((m: any) => zip.file(m.name, m.blob));
-    const blob = await zip.generateAsync({ type: 'blob' });
-    saveAs(blob, `PhotoMind-${cluster.id}.zip`);
-    setIsProcessing(false);
-  };
-
+  // ─── RENDERING ───
   if (!modelsLoaded) {
     return (
-      <div style={{ height: '70vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 20 }}>
+      <div style={{ height: '80vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 24 }}>
         {errorStatus ? (
-          <div className="card" style={{ background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', textAlign: 'center' }}>
-             <h3>❌ Error</h3>
-             <p>{errorStatus}</p>
-             <button className="btn btn-primary btn-sm" style={{ marginTop: 12 }} onClick={() => window.location.reload()}>Retry</button>
+          <div className="glass-card" style={{ border: '1px solid var(--danger)', color: 'var(--danger)' }}>
+             <h3>System Error</h3><p>{errorStatus}</p>
+             <button className="btn btn-primary" style={{ marginTop: 16 }} onClick={() => window.location.reload()}>Re-Initialize</button>
           </div>
         ) : (
-          <>
-            <span className="spinner spinner-lg" />
-            <h2 style={{ textAlign: 'center' }}>Loading AI Vision Models...</h2>
-            <p style={{ color: 'var(--text-muted)', textAlign: 'center' }}>Running locally directly inside your browser ensures 100% privacy.</p>
-          </>
+          <div style={{ textAlign: 'center' }}>
+            <div className="spinner" style={{ margin: '0 auto 20px' }} />
+            <h2 className="animate-in">Calibrating AI Neural Networks...</h2>
+            <p className="animate-in" style={{ opacity: 0.6 }}>Stateless obsidian processing active.</p>
+          </div>
         )}
       </div>
     );
@@ -364,20 +211,28 @@ export default function StatelessProcessorPage() {
 
   if (!mode) {
     return (
-      <div style={{ textAlign: 'center', padding: '60px 0' }}>
-        <h1 style={{ marginBottom: 16, fontSize: '2.5rem', padding: '0 20px' }}>Organize with Total Privacy</h1>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: 40, maxWidth: 600, margin: '0 auto 40px', padding: '0 20px' }}>
-          PhotoMind runs completely in your browser. Uncover identical faces across giant folders of photos automatically. Your pictures are never uploaded to a server.
-        </p>
-
-        <div style={{ display: 'flex', gap: 24, justifyContent: 'center', flexWrap: 'wrap', padding: '0 20px' }}>
-          <div className="card" style={{ width: '100%', maxWidth: 400, flex: '1 1 300px', cursor: 'pointer', border: '2px solid transparent' }} onClick={() => setMode('FIND')}>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: 12 }}>🔍 Find a Specific Person</h2>
-            <p style={{ color: 'var(--text-muted)' }}>Provide one photo of a person, then select a folder. We'll extract only the photos they appear in.</p>
+      <div className="animate-in" style={{ padding: '60px 0' }}>
+        <div style={{ textAlign: 'center', marginBottom: 60 }}>
+          <div className="badge animate-in" style={{ background: 'var(--obsidian-800)', border: '1px solid var(--emerald-glow)', color: 'var(--emerald)', marginBottom: 20 }}>
+            STATELIEST AI • 100% PRIVATE
           </div>
-          <div className="card" style={{ width: '100%', maxWidth: 400, flex: '1 1 300px', cursor: 'pointer', border: '2px solid transparent' }} onClick={() => setMode('GROUP')}>
-            <h2 style={{ fontSize: '1.5rem', marginBottom: 12 }}>👥 Group All People</h2>
-            <p style={{ color: 'var(--text-muted)' }}>Select a massive folder. The AI will look at every single face and automatically group identical people into collections.</p>
+          <h1 className="hero-title animate-in stagger-1">Vision Obsidian</h1>
+          <p className="hero-subtitle animate-in stagger-2">
+            Professional face identification and grouping. No cloud storage. No traces.
+            High-performance local inference for obsidian-level privacy.
+          </p>
+        </div>
+
+        <div className="mode-option-grid">
+          <div className="mode-option-card animate-in stagger-1" onClick={() => setMode('FIND')}>
+            <span style={{ fontSize: '32px' }}>🎯</span>
+            <h2 style={{ fontSize: '1.4rem', margin: '16px 0 8px' }}>Target Identification</h2>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Provide one reference face and find every match across your entire asset library.</p>
+          </div>
+          <div className="mode-option-card animate-in stagger-2" onClick={() => setMode('GROUP')}>
+            <span style={{ fontSize: '32px' }}>🪐</span>
+            <h2 style={{ fontSize: '1.4rem', margin: '16px 0 8px' }}>Neural Grouping</h2>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Cluster every distinct identity into automated dossiers using deep vector analysis.</p>
           </div>
         </div>
       </div>
@@ -385,114 +240,98 @@ export default function StatelessProcessorPage() {
   }
 
   return (
-    <div style={{ padding: '20px 0' }}>
-      <button className="btn btn-secondary btn-sm" onClick={() => { setMode(null); setMatchedBlobs([]); setClusters([]); setSourceItems([]); setTargetFile(null); }} style={{ marginBottom: 24 }}>
-        ← Back to Modes
+    <div className="animate-in" style={{ padding: '20px 0' }}>
+      <button className="btn btn-secondary btn-sm" onClick={() => { setMode(null); setMatchedBlobs([]); setClusters([]); setSourceItems([]); setTargetFile(null); }} style={{ marginBottom: 32 }}>
+        ← Terminal Home
       </button>
 
+      {/* STEP 1: TARGET */}
       {mode === 'FIND' && (
-        <div className="card" style={{ marginBottom: 32 }}>
-          <h2>1. Upload Target Person</h2>
-          <p style={{ color: 'var(--text-muted)', marginBottom: 16 }}>Select a clear, front-facing picture of the person you want to find.</p>
-          <input type="file" accept="image/*" onChange={handleTargetUpload} disabled={isProcessing} className="file-input" />
+        <div className="glass-card animate-in" style={{ marginBottom: 24 }}>
+          <h4 style={{ color: 'var(--emerald)', marginBottom: 16 }}>01. Reference Identity</h4>
+          <input type="file" accept="image/*" onChange={handleTargetUpload} disabled={isProcessing} style={{ background: 'var(--obsidian-900)', padding: 12, borderRadius: 8, width: '100%', border: '1px solid var(--border)' }} />
           {targetPreview && (
-            <div style={{ marginTop: 16, borderRadius: 8, overflow: 'hidden', width: 120, height: 120 }}>
-              <img src={targetPreview} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="Target Face" />
+            <div style={{ marginTop: 16, width: 100, height: 100, borderRadius: 12, overflow: 'hidden', border: '2px solid var(--emerald-glow)' }}>
+              <img src={targetPreview} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             </div>
            )}
         </div>
       )}
 
+      {/* STEP 2: SOURCES */}
       {((mode === 'FIND' && targetFile) || mode === 'GROUP') && (
-        <div className="card" style={{ marginBottom: 32 }}>
-          <h2>{mode === 'FIND' ? '2. Select Search Source' : '1. Select Source Files'}</h2>
-          <p style={{ color: 'var(--text-muted)', marginBottom: 16 }}>Pick the photos you want to be processed. Works on Desktop & Mobile.</p>
-          
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 600 }}>
-             {/* Mobile / Multi-Select (Universally Supported) */}
-             <div style={{ padding: 16, border: '1px dashed var(--border)', borderRadius: 8 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 8 }}>Local Photos (Mobile & PC)</label>
-                <input type="file" multiple accept="image/*" onChange={handleLocalSources} disabled={isProcessing} />
+        <div className="glass-card animate-in" style={{ marginBottom: 24 }}>
+          <h4 style={{ color: 'var(--emerald)', marginBottom: 16 }}>02. Input Assets</h4>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+             <div className="mode-option-card" style={{ padding: 20 }}>
+                <label style={{ fontSize: '12px', fontWeight: 700, opacity: 0.5, textTransform: 'uppercase' }}>Local / Phone</label>
+                <input type="file" multiple accept="image/*" onChange={handleLocalSources} disabled={isProcessing} style={{ marginTop: 8, width: '100%' }} />
              </div>
-
-             {/* Desktop Folder Pick (Webkit) */}
-             <div style={{ padding: 16, border: '1px dashed var(--border)', borderRadius: 8 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 8 }}>Local Folder (PC Only)</label>
-                {/* @ts-ignore : webkitdirectory */}
-                <input type="file" webkitdirectory="" directory="" multiple onChange={handleLocalSources} disabled={isProcessing} />
-             </div>
-
-             {/* Google Drive Connect */}
-             <div style={{ padding: 16, border: '1px dashed var(--border)', borderRadius: 8 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 8 }}>Cloud Storage</label>
-                <button className="btn btn-secondary" onClick={handleDriveFolder} disabled={isProcessing}>
-                  📁 Connect Google Drive
-                </button>
-                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
-                  Requires configuring .env with GOOGLE_CLIENT_ID and GOOGLE_API_KEY
-                </p>
+             <div className="mode-option-card" style={{ padding: 20 }} onClick={handleDriveFolder}>
+                <label style={{ fontSize: '12px', fontWeight: 700, opacity: 0.5, textTransform: 'uppercase' }}>Cloud Storage</label>
+                <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, color: 'var(--emerald)' }}>
+                  📡 <span style={{ fontWeight: 700 }}>Connect Drive</span>
+                </div>
              </div>
           </div>
-
-          {sourceItems.length > 0 && <p style={{ marginTop: 24, fontWeight: 700, color: 'var(--brand-primary)' }}>✅ {sourceItems.length} photos ready for scan.</p>}
+          {sourceItems.length > 0 && <div className="animate-in" style={{ marginTop: 16, padding: '8px 16px', background: 'var(--emerald-glow)', borderRadius: 8, color: 'var(--emerald)', fontSize: '13px', fontWeight: 700 }}>
+            ● {sourceItems.length} Assets Buffered
+          </div>}
         </div>
       )}
 
+      {/* STEP 3: CONTROL & RUN */}
       {sourceItems.length > 0 && !isProcessing && progressPct === 0 && (
-         <div style={{ textAlign: 'center', margin: '40px 0' }}>
-            <div style={{ marginBottom: 32, maxWidth: 500, margin: '0 auto 40px' }}>
-              <label style={{ display: 'block', fontWeight: 600, marginBottom: 12 }}>Choose Processing Speed & Accuracy</label>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <button 
-                  className={`btn ${processMode === 'LOOSE' ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => setProcessMode('LOOSE')}
-                  style={{ fontSize: '14px', padding: '12px' }}
-                >
-                  🚀 Loose Mode<br/>
-                  <small style={{ opacity: 0.8, fontWeight: 'normal' }}>Fastest • High Speed</small>
-                </button>
-                <button 
-                  className={`btn ${processMode === 'STRICT' ? 'btn-primary' : 'btn-secondary'}`}
-                  onClick={() => setProcessMode('STRICT')}
-                  style={{ fontSize: '14px', padding: '12px' }}
-                >
-                  ⚖️ Strict Mode<br/>
-                  <small style={{ opacity: 0.8, fontWeight: 'normal' }}>Best Accuracy • Deep Scan</small>
-                </button>
+         <div className="animate-in" style={{ textAlign: 'center', marginTop: 40 }}>
+            <div className="glass-card" style={{ maxWidth: 500, margin: '0 auto 40px', padding: 24 }}>
+              <label style={{ fontSize: '13px', fontWeight: 700, marginBottom: 16, display: 'block' }}>Neural Performance Mode</label>
+              <div className="segmented-control">
+                {(Object.keys(MODES) as Array<keyof typeof MODES>).map(m => (
+                  <button key={m} className={`segment-btn ${processMode === m ? 'active' : ''}`} onClick={() => setProcessMode(m)}>
+                    {MODES[m].label}
+                    <small>{MODES[m].desc}</small>
+                  </button>
+                ))}
               </div>
             </div>
 
-            <button className="btn btn-primary btn-lg" onClick={mode === 'FIND' ? runFindMatch : runClustering} style={{ width: '100%', maxWidth: 400 }}>
-              ▶ Start AI Scan
+            <button className="btn btn-primary btn-lg" onClick={mode === 'FIND' ? runFindMatch : runClustering} style={{ minWidth: 280 }}>
+              Initiate Neural Scan
             </button>
          </div>
       )}
 
+      {/* PROGRESS FLOW */}
       {isProcessing && (
-        <div className="card" style={{ textAlign: 'center', padding: 40, marginBottom: 32 }}>
-          <span className="spinner spinner-lg" style={{ marginBottom: 16 }} />
-          <h3>{progressMsg}</h3>
-          <div style={{ background: 'var(--border)', height: 8, borderRadius: 4, width: '100%', maxWidth: 400, margin: '20px auto 0', overflow: 'hidden' }}>
-             <div style={{ height: '100%', background: 'var(--brand-primary)', width: `${progressPct}%`, transition: 'width 0.2s' }} />
+        <div className="glass-card animate-in" style={{ textAlign: 'center', padding: 48, margin: '40px auto', maxWidth: 600 }}>
+          <div className="spinner" style={{ margin: '0 auto 24px' }} />
+          <h3 style={{ marginBottom: 8 }}>{progressMsg}</h3>
+          <div className="progress-container">
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${progressPct}%` }} />
+            </div>
           </div>
         </div>
       )}
 
+      {/* RESULTS SECT: FIND */}
       {!isProcessing && matchedBlobs.length > 0 && mode === 'FIND' && (
-        <div style={{ marginTop: 32 }}>
-           <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 16, marginBottom: 20 }}>
-              <h2>🎉 Found {matchedBlobs.length} Matches!</h2>
-              <button className="btn btn-primary" onClick={downloadMatches}>
-                ⬇️ Download ZIP
-              </button>
+        <div className="animate-in" style={{ marginTop: 48 }}>
+           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 32 }}>
+              <h2 style={{ fontSize: '1.8rem' }}>Found {matchedBlobs.length} Neural Matches</h2>
+              <button className="btn btn-primary btn-sm" onClick={() => {
+                 const zip = new JSZip();
+                 matchedBlobs.forEach(m => zip.file(m.name, m.blob));
+                 zip.generateAsync({ type: 'blob' }).then(b => saveAs(b, 'Obsidian-Matches.zip'));
+              }}>Export Batch (ZIP)</button>
            </div>
            
-           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 16 }}>
+           <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 20 }}>
              {matchedBlobs.map((m, i) => (
-                <div key={i} style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', background: 'var(--bg-card)', position: 'relative' }}>
-                  <img src={m.url} style={{ width: '100%', height: 150, objectFit: 'cover' }} alt="Match" loading="lazy" />
-                  <div style={{ padding: 8, fontSize: 11, textAlign: 'center', color: 'var(--text-muted)' }}>
-                    {m.name.slice(0, 20)}
+                <div key={i} className="photo-item animate-in" style={{ animationDelay: `${i * 0.05}s` }}>
+                  <img src={m.url} loading="lazy" />
+                  <div style={{ position: 'absolute', bottom: 0, width: '100%', padding: '10px', background: 'linear-gradient(to top, black, transparent)', fontSize: '10px', opacity: 0.7 }}>
+                    {m.name}
                   </div>
                 </div>
              ))}
@@ -500,24 +339,25 @@ export default function StatelessProcessorPage() {
         </div>
       )}
 
+      {/* RESULTS SECT: GROUP */}
       {!isProcessing && clusters.length > 0 && mode === 'GROUP' && (
-        <div style={{ marginTop: 32 }}>
-           <h2 style={{ marginBottom: 24 }}>🎉 Automatic Face Clusters</h2>
-           
-           <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
-             {clusters.map((cluster, i) => (
-                <div key={i} className="card" style={{ padding: 24 }}>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 16, marginBottom: 16 }}>
-                    <h3 style={{ margin: 0 }}>{cluster.id} <span style={{ color: 'var(--text-muted)', fontSize: 14, fontWeight: 'normal' }}>({cluster.files.length} photos)</span></h3>
-                    <button className="btn btn-secondary btn-sm" onClick={() => downloadCluster(cluster)}>
-                      ⬇️ Save Group ZIP
-                    </button>
+        <div className="animate-in" style={{ marginTop: 48 }}>
+           <h2 style={{ marginBottom: 32 }}>Neural Clusters Identified</h2>
+           <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+             {clusters.map((cl, i) => (
+                <div key={i} className="glass-card animate-in" style={{ animationDelay: `${i * 0.15}s` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                    <h3>{cl.id} <span style={{ opacity: 0.4, fontWeight: 'normal', fontSize: '14px' }}>— {cl.files.length} instances</span></h3>
+                    <button className="btn btn-secondary btn-sm" onClick={() => {
+                        const zip = new JSZip();
+                        cl.files.forEach((f:any) => zip.file(f.name, f.blob));
+                        zip.generateAsync({ type: 'blob' }).then(b => saveAs(b, `${cl.id}.zip`));
+                    }}>Export Dossier</button>
                   </div>
-
-                  <div style={{ display: 'flex', overflowX: 'auto', gap: 12, paddingBottom: 8 }}>
-                    {cluster.files.map((fileInfo, j) => (
-                      <div key={j} style={{ width: 100, height: 100, flexShrink: 0, borderRadius: 8, overflow: 'hidden', background: '#e5e7eb' }}>
-                         <img src={fileInfo.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} alt="Face" loading="lazy" />
+                  <div style={{ display: 'flex', overflowX: 'auto', gap: 12, paddingBottom: 10 }}>
+                    {cl.files.map((f:any, j:number) => (
+                      <div key={j} style={{ width: 120, height: 120, borderRadius: 8, overflow: 'hidden', flexShrink: 0, border: '1px solid var(--border)' }}>
+                         <img src={f.url} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
                       </div>
                     ))}
                   </div>
@@ -526,7 +366,10 @@ export default function StatelessProcessorPage() {
            </div>
         </div>
       )}
-
     </div>
   );
 }
+
+type InputImage = 
+  | { type: 'local', file: File, name: string }
+  | { type: 'drive', id: string, name: string };
