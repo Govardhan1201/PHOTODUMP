@@ -12,6 +12,8 @@ type InputImage =
   | { type: 'local', file: File, name: string }
   | { type: 'drive', id: string, name: string };
 
+const MAX_DETECTION_SIZE = 800; // Downscale images to this max width/height for faster AI processing
+
 // Users MUST put their credentials in their .env
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
 const GOOGLE_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY || '';
@@ -113,13 +115,54 @@ export default function StatelessProcessorPage() {
   };
 
   // ─── SAFE IMAGE LOADER ───
+  // Downscales image to preserve memory and speed up AI inference
   const getDescriptorsForImageBlob = async (blob: Blob) => {
-    const img = document.createElement('img');
-    img.src = URL.createObjectURL(blob);
-    await new Promise((res) => (img.onload = res));
-    const detections = await faceapi.detectAllFaces(img).withFaceLandmarks().withFaceDescriptors();
-    URL.revokeObjectURL(img.src);
-    return detections;
+    return new Promise<faceapi.WithFaceDescriptor<faceapi.WithFaceLandmarks<{ detection: faceapi.FaceDetection }>>[]>(async (resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const img = document.createElement('img');
+      img.src = url;
+      
+      img.onload = async () => {
+        try {
+          // Use a hidden canvas to downscale
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+          
+          if (width > height) {
+            if (width > MAX_DETECTION_SIZE) {
+              height *= MAX_DETECTION_SIZE / width;
+              width = MAX_DETECTION_SIZE;
+            }
+          } else {
+            if (height > MAX_DETECTION_SIZE) {
+              width *= MAX_DETECTION_SIZE / height;
+              height = MAX_DETECTION_SIZE;
+            }
+          }
+          
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) throw new Error("Canvas context failed");
+          
+          ctx.drawImage(img, 0, 0, width, height);
+          
+          // Run detection on the smaller canvas
+          const detections = await faceapi.detectAllFaces(canvas).withFaceLandmarks().withFaceDescriptors();
+          
+          URL.revokeObjectURL(url);
+          resolve(detections);
+        } catch (err) {
+          URL.revokeObjectURL(url);
+          reject(err);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("Failed to load image"));
+      };
+    });
   };
 
   // ─── RUNNING THE FIND MATCH ALGORITHM ───
@@ -149,29 +192,35 @@ export default function StatelessProcessorPage() {
         setProgressMsg(`Scanning photo ${i + 1} of ${sourceItems.length}...`);
         setProgressPct(10 + Math.floor((i / sourceItems.length) * 90));
         
-        let blob: Blob;
-        if (item.type === 'drive') {
-          // Download dynamically to save RAM!
-           blob = await downloadDriveFile(googleAccessToken!, item.id);
-        } else {
-           blob = item.file as Blob;
-        }
-
-        const detections = await getDescriptorsForImageBlob(blob);
-        let bestDistance = 1.0;
-        let found = false;
-
-        for (const d of detections) {
-          const match = faceMatcher.findBestMatch(d.descriptor);
-          if (match.label === 'target') {
-            found = true;
-            if (match.distance < bestDistance) bestDistance = match.distance;
+        try {
+          let blob: Blob;
+          if (item.type === 'drive') {
+            blob = await downloadDriveFile(googleAccessToken!, item.id);
+          } else {
+            blob = item.file as Blob;
           }
-        }
 
-        if (found) {
-          matches.push({ blob, url: URL.createObjectURL(blob), distance: bestDistance, name: item.name });
+          const detections = await getDescriptorsForImageBlob(blob);
+          let bestDistance = 1.0;
+          let found = false;
+
+          for (const d of detections) {
+            const match = faceMatcher.findBestMatch(d.descriptor);
+            if (match.label === 'target') {
+              found = true;
+              if (match.distance < bestDistance) bestDistance = match.distance;
+            }
+          }
+
+          if (found) {
+            matches.push({ blob, url: URL.createObjectURL(blob), distance: bestDistance, name: item.name });
+          }
+        } catch (itemErr) {
+          console.error(`Skipping file ${item.name} due to error:`, itemErr);
         }
+        
+        // Yield to browser UI thread more aggressively
+        await new Promise(r => setTimeout(r, 0));
       }
 
       setMatchedBlobs(matches.sort((a,b) => a.distance - b.distance));
@@ -201,40 +250,48 @@ export default function StatelessProcessorPage() {
         setProgressMsg(`Analyzing faces in photo ${i + 1} of ${sourceItems.length}...`);
         setProgressPct(5 + Math.floor((i / sourceItems.length) * 90));
 
-        let blob: Blob;
-        if (item.type === 'drive') {
-           blob = await downloadDriveFile(googleAccessToken!, item.id);
-        } else {
-           blob = item.file as Blob;
-        }
-        
-        const url = URL.createObjectURL(blob);
-        const detections = await getDescriptorsForImageBlob(blob);
-
-        for (const d of detections) {
-          let matchedCluster = null;
-          let bestDist = MATCH_THRESHOLD;
-
-          for (const cluster of activeClusters) {
-            const dist = faceapi.euclideanDistance(d.descriptor, cluster.descriptor);
-            if (dist < bestDist) {
-              bestDist = dist;
-              matchedCluster = cluster;
-            }
-          }
-
-          if (matchedCluster) {
-            if (!matchedCluster.files.find(f => f.name === item.name)) {
-               matchedCluster.files.push({ blob, url, name: item.name });
-            }
+        try {
+          let blob: Blob;
+          if (item.type === 'drive') {
+            blob = await downloadDriveFile(googleAccessToken!, item.id);
           } else {
-            activeClusters.push({
-              id: `Person ${activeClusters.length + 1}`,
-              descriptor: d.descriptor,
-              files: [{ blob, url, name: item.name }]
-            });
+            blob = item.file as Blob;
           }
+          
+          const detections = await getDescriptorsForImageBlob(blob);
+          let addedFileToFinalResults = false;
+
+          for (const d of detections) {
+            let matchedCluster = null;
+            let bestDist = MATCH_THRESHOLD;
+
+            for (const cluster of activeClusters) {
+              const dist = faceapi.euclideanDistance(d.descriptor, cluster.descriptor);
+              if (dist < bestDist) {
+                bestDist = dist;
+                matchedCluster = cluster;
+              }
+            }
+
+            if (matchedCluster) {
+              if (!matchedCluster.files.find(f => f.name === item.name)) {
+                matchedCluster.files.push({ blob, url: URL.createObjectURL(blob), name: item.name });
+                addedFileToFinalResults = true;
+              }
+            } else {
+              activeClusters.push({
+                id: `Person ${activeClusters.length + 1}`,
+                descriptor: d.descriptor,
+                files: [{ blob, url: URL.createObjectURL(blob), name: item.name }]
+              });
+              addedFileToFinalResults = true;
+            }
+          }
+        } catch (itemErr) {
+          console.error(`Skipping file ${item.name} due to error:`, itemErr);
         }
+
+        await new Promise(r => setTimeout(r, 0));
       }
 
       const validClusters = activeClusters.filter(c => c.files.length >= 2).map(c => ({
