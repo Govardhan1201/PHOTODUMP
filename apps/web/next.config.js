@@ -35,9 +35,8 @@ const nextConfig = {
       config.resolve.alias = {
         ...config.resolve.alias,
         'onnxruntime-node': false,
-        // Absolute path bypasses package.json 'exports' field blocks.
-        // This forces Webpack to use the ES5 CommonJS bundle, avoiding ALL import.meta and .mjs Terser bugs!
-        'onnxruntime-web$': path.resolve(__dirname, 'node_modules/onnxruntime-web/dist/ort.min.js'),
+        // Use require.resolve to safely find the absolute path in monorepos (bypassing Next.js exports blocks)
+        'onnxruntime-web$': require.resolve('onnxruntime-web'),
       };
     }
 
