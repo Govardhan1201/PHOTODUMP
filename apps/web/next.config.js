@@ -22,7 +22,7 @@ const nextConfig = {
     ];
   },
 
-  webpack(config, { webpack, isServer }) {
+  webpack(config, { isServer }) {
     // Prevent Webpack from parsing Node-only modules
     config.resolve.fallback = {
       ...config.resolve.fallback,
@@ -33,19 +33,11 @@ const nextConfig = {
       config.resolve.alias = {
         ...config.resolve.alias,
         'onnxruntime-node': false,
-        // Also alias the specific problematic file inside onnxruntime-web
-        'ort.node.min.mjs': false,
+        // Force Webpack to use the CommonJS build to avoid Terser choking on import.meta in .mjs files
+        'onnxruntime-web': 'onnxruntime-web/dist/ort.min.js',
       };
     }
 
-    config.plugins.push(
-      new webpack.IgnorePlugin({
-        resourceRegExp: /ort\.node\.min\.mjs$/,
-      }),
-      new webpack.IgnorePlugin({
-        resourceRegExp: /^onnxruntime-node$/,
-      })
-    );
     // Allow .wasm file imports
     config.experiments = { ...config.experiments, asyncWebAssembly: true };
     return config;
