@@ -29,6 +29,12 @@ const nextConfig = {
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,
+      'node:fs': false,
+      'node:fs/promises': false,
+      'node:os': false,
+      'node:path': false,
+      'node:child_process': false,
+      'node:crypto': false,
     };
     
     if (!isServer) {
@@ -42,7 +48,7 @@ const nextConfig = {
 
     config.plugins.push(
       new webpack.IgnorePlugin({
-        resourceRegExp: /ort\.node\.min\.mjs$/,
+        resourceRegExp: /ort\.node\.min/,
       }),
       new webpack.IgnorePlugin({
         resourceRegExp: /^onnxruntime-node$/,
