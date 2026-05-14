@@ -2,9 +2,10 @@ const fs = require('fs');
 const path = require('path');
 
 try {
-  // Dynamically resolve the package location (handles monorepo hoisting)
-  const pkgPath = require.resolve('onnxruntime-web/package.json');
-  const wasmDir = path.join(path.dirname(pkgPath), 'dist');
+  // Resolve the main file of the package, then navigate to the dist folder
+  // This avoids the "exports" restriction on package.json in modern Node.js
+  const mainFile = require.resolve('onnxruntime-web');
+  const wasmDir = path.join(path.dirname(mainFile), '..', 'dist');
   const destDir = path.join(__dirname, 'public', 'onnx');
 
   if (!fs.existsSync(destDir)) {

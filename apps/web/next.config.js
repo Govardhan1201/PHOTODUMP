@@ -22,14 +22,14 @@ const nextConfig = {
     ];
   },
 
-  webpack(config) {
+  webpack(config, { webpack }) {
     // Prevent Webpack from parsing Node-only modules
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,
     };
     config.plugins.push(
-      new config.webpack.IgnorePlugin({
+      new webpack.IgnorePlugin({
         resourceRegExp: /^onnxruntime-node$/,
       })
     );
