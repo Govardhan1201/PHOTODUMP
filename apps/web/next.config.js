@@ -38,11 +38,15 @@ const nextConfig = {
     };
     
     if (!isServer) {
+      // Find where ONNX is installed in the monorepo
+      const ortMainFile = require.resolve('onnxruntime-web');
+      const ortMinJsPath = path.join(path.dirname(ortMainFile), 'ort.min.js');
+
       config.resolve.alias = {
         ...config.resolve.alias,
         'onnxruntime-node': false,
-        // Use require.resolve to safely find the absolute path in monorepos (bypassing Next.js exports blocks)
-        'onnxruntime-web$': require.resolve('onnxruntime-web'),
+        // Alias directly to the CommonJS web bundle to bypass exports maps and Node-only imports
+        'onnxruntime-web$': ortMinJsPath,
       };
     }
 
