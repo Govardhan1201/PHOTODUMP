@@ -22,13 +22,26 @@ const nextConfig = {
     ];
   },
 
-  webpack(config, { webpack }) {
+  webpack(config, { webpack, isServer }) {
     // Prevent Webpack from parsing Node-only modules
     config.resolve.fallback = {
       ...config.resolve.fallback,
       fs: false,
     };
+    
+    if (!isServer) {
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        'onnxruntime-node': false,
+        // Also alias the specific problematic file inside onnxruntime-web
+        'ort.node.min.mjs': false,
+      };
+    }
+
     config.plugins.push(
+      new webpack.IgnorePlugin({
+        resourceRegExp: /ort\.node\.min\.mjs$/,
+      }),
       new webpack.IgnorePlugin({
         resourceRegExp: /^onnxruntime-node$/,
       })
