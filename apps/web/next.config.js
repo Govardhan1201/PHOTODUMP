@@ -22,14 +22,17 @@ const nextConfig = {
     ];
   },
 
-  webpack(config, { isServer }) {
-    if (!isServer) {
-      // Prevent Node-only onnxruntime-node from being bundled for the browser
-      config.resolve.alias = {
-        ...config.resolve.alias,
-        'onnxruntime-node': false,
-      };
-    }
+  webpack(config) {
+    // Prevent Webpack from parsing Node-only modules
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+      fs: false,
+    };
+    config.plugins.push(
+      new config.webpack.IgnorePlugin({
+        resourceRegExp: /^onnxruntime-node$/,
+      })
+    );
     // Allow .wasm file imports
     config.experiments = { ...config.experiments, asyncWebAssembly: true };
     return config;
