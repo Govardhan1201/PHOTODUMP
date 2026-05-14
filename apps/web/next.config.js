@@ -22,6 +22,8 @@ const nextConfig = {
     ];
   },
 
+  transpilePackages: ['onnxruntime-web'],
+
   webpack(config, { webpack, isServer }) {
     // Prevent Webpack from parsing Node-only modules
     config.resolve.fallback = {
@@ -44,6 +46,15 @@ const nextConfig = {
         resourceRegExp: /^onnxruntime-node$/,
       })
     );
+
+    // Force Webpack to parse .mjs files safely to prevent Terser from choking on import.meta
+    config.module.rules.push({
+      test: /\.m?js$/,
+      type: 'javascript/auto',
+      resolve: {
+        fullySpecified: false,
+      },
+    });
 
     // Allow .wasm file imports
     config.experiments = { ...config.experiments, asyncWebAssembly: true };
