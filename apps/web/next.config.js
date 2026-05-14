@@ -1,3 +1,5 @@
+const path = require('path');
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
@@ -22,8 +24,6 @@ const nextConfig = {
     ];
   },
 
-  transpilePackages: ['onnxruntime-web'],
-
   webpack(config, { webpack, isServer }) {
     // Prevent Webpack from parsing Node-only modules
     config.resolve.fallback = {
@@ -35,6 +35,9 @@ const nextConfig = {
       config.resolve.alias = {
         ...config.resolve.alias,
         'onnxruntime-node': false,
+        // Absolute path bypasses package.json 'exports' field blocks.
+        // This forces Webpack to use the ES5 CommonJS bundle, avoiding ALL import.meta and .mjs Terser bugs!
+        'onnxruntime-web$': path.resolve(__dirname, 'node_modules/onnxruntime-web/dist/ort.min.js'),
       };
     }
 
@@ -46,15 +49,6 @@ const nextConfig = {
         resourceRegExp: /^onnxruntime-node$/,
       })
     );
-
-    // Force Webpack to parse .mjs files safely to prevent Terser from choking on import.meta
-    config.module.rules.push({
-      test: /\.m?js$/,
-      type: 'javascript/auto',
-      resolve: {
-        fullySpecified: false,
-      },
-    });
 
     // Allow .wasm file imports
     config.experiments = { ...config.experiments, asyncWebAssembly: true };
