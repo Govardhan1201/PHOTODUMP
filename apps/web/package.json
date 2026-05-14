@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "postinstall": "node copy-wasm.js",
     "dev": "next dev --port 3000",
-    "build": "next build",
+    "build": "node copy-wasm.js && next build",
     "start": "next start",
     "type-check": "tsc --noEmit",
     "lint": "next lint"
@@ -17,6 +18,7 @@
     "lucide-react": "^0.378.0",
     "next": "14.2.3",
     "next-auth": "^4.24.7",
+    "onnxruntime-web": "^1.18.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "swr": "^2.2.5"
