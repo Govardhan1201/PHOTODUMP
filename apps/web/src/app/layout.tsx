@@ -1,15 +1,27 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import '@/styles/globals.css';
 
 export const metadata: Metadata = {
-  title: 'PhotoMind — AI Photo Organizer',
-  description: 'Automatically organize your photo collection with AI. Detect faces, cluster people, and sort by category.',
-  keywords: ['photo organizer', 'AI photos', 'face detection', 'Google Drive photos'],
+  title: 'Vision Obsidian — Stateless AI Face Search',
+  description: '100% private, session-only face search and photo organization. Runs entirely in your browser using ONNX AI models.',
+  keywords: ['photo organizer', 'AI photos', 'face detection', 'privacy', 'stateless', 'ONNX', 'Vision Obsidian'],
   openGraph: {
-    title: 'PhotoMind — AI Photo Organizer',
-    description: 'Automatically organize your photo collection with AI.',
+    title: 'Vision Obsidian — Stateless AI Face Search',
+    description: '100% private, session-only face search. Runs entirely in your browser.',
     type: 'website',
+    images: ['/favicon.ico'], // Replace with actual OG image if available
   },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Vision Obsidian',
+    description: '100% private, session-only face search. Runs entirely in your browser.',
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: '#000000',
+  width: 'device-width',
+  initialScale: 1,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -17,7 +29,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <head>
         <link rel="icon" href="/favicon.ico" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
       </head>
       <body>{children}</body>
     </html>

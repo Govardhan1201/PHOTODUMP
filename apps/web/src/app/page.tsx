@@ -39,6 +39,11 @@ export default function Page() {
   const [targetPreview, setTargetPreview] = useState('');
   const [sourceItems,   setSourceItems]   = useState<InputImage[]>([]);
   const [results,       setResults]       = useState<MatchResult[]>([]);
+  
+  // UX state
+  const [refDrag, setRefDrag] = useState(false);
+  const [srcDrag, setSrcDrag] = useState(false);
+  const [toasts,  setToasts]  = useState<{ id: string; msg: string; type: 'error' | 'success' }[]>([]);
 
   // Processing
   const [processing, setProcessing] = useState(false);
@@ -77,18 +82,40 @@ export default function Page() {
   }, [activeCid]);
 
   // ── Handlers ──────────────────────────────────────────────────────────────
-  const handleTarget = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0]; if (!f) return;
+  const showToast = (msg: string, type: 'error' | 'success' = 'error') => {
+    const id = Math.random().toString(36).substr(2, 9);
+    setToasts(prev => [...prev, { id, msg, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  };
+
+  const handleRefFile = (f?: File) => {
+    if (!f || !f.type.startsWith('image/')) {
+      if (f) showToast('Please upload a valid image file');
+      return;
+    }
     setTargetFile(f);
     setTargetPreview(URL.createObjectURL(f));
     setResults([]);
   };
 
-  const handleLocalSrc = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files) return;
-    const files = Array.from(e.target.files).filter(f => f.type.startsWith('image/'));
-    setSourceItems(files.map(f => ({ type: 'local', file: f, name: f.name })));
+  const handleSrcFiles = (files: FileList | File[]) => {
+    const valid = Array.from(files).filter(f => f.type.startsWith('image/'));
+    if (!valid.length) {
+      showToast('No valid images found');
+      return;
+    }
+    setSourceItems(valid.map(f => ({ type: 'local', file: f, name: f.name })));
     setResults([]);
+  };
+
+  const resetSession = () => {
+    setTargetFile(null);
+    setTargetPreview('');
+    setSourceItems([]);
+    setResults([]);
+    setStage('');
+    setPct(0);
+    showToast('Session cleared', 'success');
   };
 
   const handleZip = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -106,7 +133,7 @@ export default function Page() {
       }
       setSourceItems(out); setResults([]);
       setStage(`Extracted ${out.length} photos`); setPct(100);
-    } catch { setStage('ZIP extraction failed'); }
+    } catch { setStage('ZIP extraction failed'); showToast('Failed to extract ZIP file'); }
     finally { setProcessing(false); setTimeout(() => setPct(0), 800); }
   };
 
@@ -127,7 +154,7 @@ export default function Page() {
         setResults([]);
       }
     } catch (err: any) {
-      alert(`Drive error: ${err?.message || 'Connection failed'}. Check Google Cloud Console Origins.`);
+      showToast(`Drive error: ${err?.message || 'Connection failed'}. Check Origins.`);
     } finally { setProcessing(false); setPct(0); }
   };
 
@@ -141,7 +168,11 @@ export default function Page() {
       setStage('Detecting reference face…');
       const refFaces = await getFaceEmbeddings(targetFile);
       const ref = refFaces.find(f => !f.rejectedReason);
-      if (!ref) { alert('No usable face found in your reference photo. Try a clearer, front-facing photo.'); setProcessing(false); return; }
+      if (!ref) { 
+        showToast('No usable face found in your reference photo. Try a clearer, front-facing photo.'); 
+        setProcessing(false); 
+        return; 
+      }
 
       const threshold = MATCH_MODES[matchMode].cosineMin;
       const matches: MatchResult[] = [];
@@ -185,8 +216,11 @@ export default function Page() {
       setResults(matches);
       setStage(`Done — ${matches.length} match${matches.length !== 1 ? 'es' : ''} found`);
       setPct(100);
+      if (matches.length === 0) showToast('No matches found. Try loose mode.', 'error');
+      else showToast(`Search complete! Found ${matches.length} matches.`, 'success');
     } catch (e: any) {
       setStage(`Error: ${e?.message || 'Unknown error'}`);
+      showToast(`Error: ${e?.message || 'Unknown error'}`);
     } finally { setProcessing(false); }
   };
 
@@ -238,6 +272,15 @@ export default function Page() {
   // ── Render: main ──────────────────────────────────────────────────────────
   return (
     <div className="animate-in" style={{ padding: '20px 0' }}>
+      
+      {/* Toasts */}
+      <div className="toast-container">
+        {toasts.map(t => (
+          <div key={t.id} className={`toast ${t.type}`}>
+            {t.type === 'error' ? '⚠️' : '✅'} {t.msg}
+          </div>
+        ))}
+      </div>
 
       {/* Header */}
       <div style={{ marginBottom: 32, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
@@ -258,15 +301,27 @@ export default function Page() {
               </button>
             ))}
           </div>
+          {/* Reset Button */}
+          {(targetFile || sourceItems.length > 0) && (
+            <button className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: 11, marginLeft: 8 }} onClick={resetSession} disabled={processing}>
+              ↺ Start Over
+            </button>
+          )}
         </div>
       </div>
 
       {/* Step 1 — Reference photo */}
-      <div className="glass-card animate-in" style={{ marginBottom: 20 }}>
+      <div 
+        className={`glass-card drop-zone animate-in ${refDrag ? 'active' : ''}`} 
+        style={{ marginBottom: 20 }}
+        onDragOver={(e) => { e.preventDefault(); setRefDrag(true); }}
+        onDragLeave={() => setRefDrag(false)}
+        onDrop={(e) => { e.preventDefault(); setRefDrag(false); handleRefFile(e.dataTransfer.files?.[0]); }}
+      >
         <h4 style={{ color: 'var(--emerald)', marginBottom: 4, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Step 1</h4>
         <h3 style={{ marginBottom: 12 }}>Upload Reference Photo</h3>
-        <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>One clear, front-facing photo of the person to search for.</p>
-        <input type="file" accept="image/jpeg,image/png" onChange={handleTarget} id="ref-input" style={{ display: 'none' }} disabled={processing} />
+        <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>Drag and drop or select one clear, front-facing photo of the person to search for.</p>
+        <input type="file" accept="image/jpeg,image/png" onChange={(e) => handleRefFile(e.target.files?.[0])} id="ref-input" style={{ display: 'none' }} disabled={processing} />
         <button className="btn btn-primary" onClick={() => document.getElementById('ref-input')?.click()} disabled={processing}>
           {targetFile ? '↺ Change Photo' : 'Select Photo'}
         </button>
@@ -291,11 +346,17 @@ export default function Page() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: 12 }}>
 
             {/* Local photos */}
-            <div className="mode-option-card" style={{ padding: 20, textAlign: 'center' }}>
+            <div 
+              className={`mode-option-card drop-zone ${srcDrag ? 'active' : ''}`} 
+              style={{ padding: 20, textAlign: 'center' }}
+              onDragOver={(e) => { e.preventDefault(); setSrcDrag(true); }}
+              onDragLeave={() => setSrcDrag(false)}
+              onDrop={(e) => { e.preventDefault(); setSrcDrag(false); handleSrcFiles(e.dataTransfer.files); }}
+            >
               <span style={{ fontSize: 28, display: 'block', marginBottom: 10 }}>📸</span>
               <h4 style={{ marginBottom: 6, fontSize: 14 }}>Photos / Folder</h4>
-              <p style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 12 }}>Local files or phone gallery</p>
-              <input type="file" multiple accept="image/jpeg,image/png" onChange={handleLocalSrc} id="src-input" style={{ display: 'none' }} disabled={processing} />
+              <p style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 12 }}>Drag & drop multiple files</p>
+              <input type="file" multiple accept="image/jpeg,image/png" onChange={(e) => { if(e.target.files) handleSrcFiles(e.target.files); }} id="src-input" style={{ display: 'none' }} disabled={processing} />
               <button className="btn btn-secondary btn-sm" onClick={() => document.getElementById('src-input')?.click()} style={{ width: '100%' }}>Select</button>
             </div>
 

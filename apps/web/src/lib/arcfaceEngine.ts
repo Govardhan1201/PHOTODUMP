@@ -63,8 +63,8 @@ export async function loadModels(
   // 2. Load ONNX runtime lazily (avoids SSR issues)
   if (!ort) {
     onProgress?.('Initialising ONNX runtime…', 25);
-    ort = await import('onnxruntime-web');
-    ort.env.wasm.wasmPaths = '/onnx/';
+    ort = (await import('onnxruntime-web/dist/ort.wasm.min.js')) as any;
+    ort!.env.wasm.wasmPaths = '/onnx/';
   }
 
   // 3. Load ArcFace ONNX model (with IndexedDB caching)
